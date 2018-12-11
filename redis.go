@@ -1,26 +1,10 @@
 package utils
 
-// // 设置redis
-// utils.RedisPool = *utils.NewRedisStore(
-// 	&utils.RedisStoreOptions{
-// 		Network:        "tcp",
-// 		Address:        conf.Config.Redis.Address,
-// 		ConnectTimeout: time.Duration(50) * time.Millisecond,
-// 		ReadTimeout:    time.Duration(50) * time.Millisecond,
-// 		WriteTimeout:   time.Duration(50) * time.Millisecond,
-// 		IdleTimeout:    time.Duration(50) * time.Millisecond,
-// 		Database:       conf.Config.Redis.Database,
-// 		MaxIdle:        conf.Config.Redis.MaxIdle,
-// 		MaxActive:      conf.Config.Redis.MaxActive,
-// 	})
-// // 使用redis
-// utils.RedisPool.Get("keepredis")
-
 import (
 	"fmt"
-	"log"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/garyburd/redigo/redis"
 )
 
@@ -28,35 +12,76 @@ import (
 var DefaultRedisConnectTimeout uint32 = 2000
 var DefaultRedisReadTimeout uint32 = 1000
 var DefaultRedisWriteTimeout uint32 = 1000
+var DefaultIdleTimeout uint32 = 10
 
-var rs *RedisStore
+//var rs *RedisStore
 var RedisPool RedisStore
-
-type RedisStoreOptions struct {
-	Network              string
-	Address              string
-	ConnectTimeout       time.Duration
-	ReadTimeout          time.Duration
-	WriteTimeout         time.Duration
-	IdleTimeout          time.Duration
-	Database             int           // Redis database to use for session keys
-	KeyPrefix            string        // If set, keys will be KeyPrefix:SessionID (semicolon added)
-	BrowserSessServerTTL time.Duration // Defaults to 2 days
-	MaxIdle              int
-	MaxActive            int
-}
+var rsconfigs redisConfig
 
 type RedisStore struct {
 	pool    *redis.Pool
-	options *RedisStoreOptions
+	options *configItem
 }
 
-func NewRedisStore(opts *RedisStoreOptions) *RedisStore {
+// redis配置
+type configItem struct {
+	Address     string `toml:"address"`
+	ListName    string `toml:"listname"`
+	Database    int    `toml:"Database,omitempty"`
+	MaxIdle     int    `toml:"MaxIdle,omitempty"`     //最大的空闲连接数
+	MaxActive   int    `toml:"MaxActive,omitempty"`   //最大的激活连接数
+	IdleTimeout int    `toml:"IdleTimeout,omitempty"` //最大的空闲连接等待时间，超过此时间后，空闲连接将被关闭
+	Timeout     int    `toml:"timeout,omitempty"`
+}
+
+type redisConfig struct {
+	Configs map[string]configItem `toml:"redis"`
+}
+
+func RedisLoad(cfgPath string, sub string) *RedisStore {
+	if _, err := toml.DecodeFile(cfgPath, &rsconfigs); err != nil {
+		panic("Redis Config load Failed")
+	}
+	subconfig, ishas := rsconfigs.Configs[sub]
+	if !ishas {
+		panic("Redis SubConfig load Failed")
+	}
+	if subconfig.Address == "" {
+		panic("Redis config need address and listname")
+	}
+	if subconfig.MaxIdle == 0 {
+		subconfig.MaxIdle = 20
+	}
+	if subconfig.MaxActive == 0 {
+		subconfig.MaxActive = 100
+	}
+	if subconfig.IdleTimeout == 0 {
+		subconfig.IdleTimeout = 10
+	}
+	if subconfig.Timeout == 0 {
+		subconfig.Timeout = 1000
+	}
+	pool := &redis.Pool{
+		MaxIdle:     subconfig.MaxIdle,
+		MaxActive:   subconfig.MaxActive,
+		IdleTimeout: time.Duration(subconfig.IdleTimeout) * time.Second,
+		Dial: func() (redis.Conn, error) {
+			return redis.Dial("tcp", subconfig.Address)
+		},
+	}
+	rs := &RedisStore{
+		pool:    pool,
+		options: &subconfig,
+	}
+	return rs
+}
+
+func NewRedisStore(opts *configItem) *RedisStore {
 	fmt.Println("NewRedisStore Init")
 	pool := &redis.Pool{
 		MaxIdle:     opts.MaxIdle,
 		MaxActive:   opts.MaxActive,
-		IdleTimeout: opts.IdleTimeout,
+		IdleTimeout: time.Duration(opts.IdleTimeout) * time.Second,
 		Dial: func() (redis.Conn, error) {
 			return redis.Dial("tcp", opts.Address)
 		},
@@ -65,8 +90,12 @@ func NewRedisStore(opts *RedisStoreOptions) *RedisStore {
 		pool:    pool,
 		options: opts,
 	}
-	// 初始化
 	return rs
+}
+
+func (self *RedisStore) Close() {
+	fmt.Println("Redis Closed")
+	self.Pool().Close()
 }
 
 func (self *RedisStore) Pool() *redis.Pool {
@@ -75,174 +104,148 @@ func (self *RedisStore) Pool() *redis.Pool {
 
 //设置bit 值
 func (self *RedisStore) Setbit(key string, offset int, val int) (int, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Int(conn.Do("SETBIT", key, offset, val))
+
+	return redis.Int(self.Do("SETBIT", key, offset, val))
 }
 
 //获取bit 值
 func (self *RedisStore) Getbit(key string, offset int) (int, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Int(conn.Do("GETBIT", key, offset))
+
+	return redis.Int(self.Do("GETBIT", key, offset))
 }
 
 //获取bit 值
 func (self *RedisStore) Incrby(key string, offset int) (int, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Int(conn.Do("INCRBY", key, offset))
+
+	return redis.Int(self.Do("INCRBY", key, offset))
 }
 
 func (self *RedisStore) SetList(key string, data []struct{}) (bool, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Bool(conn.Do("SET", key, data))
+
+	return redis.Bool(self.Do("SET", key, data))
 }
 
 func (self *RedisStore) Set(key string, data string) (bool, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Bool(conn.Do("SET", key, data))
+
+	return redis.Bool(self.Do("SET", key, data))
 }
 
 func (self *RedisStore) Incr(key string) (bool, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Bool(conn.Do("INCR", key))
+
+	return redis.Bool(self.Do("INCR", key))
 }
 func (self *RedisStore) Setex(key string, timeout int, data string) (string, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.String(conn.Do("SETEX", key, timeout, data))
+
+	return redis.String(self.Do("SETEX", key, timeout, data))
 }
 
 func (self *RedisStore) IsKeyExist(key string) (bool, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Bool(conn.Do("EXISTS", key))
+
+	return redis.Bool(self.Do("EXISTS", key))
 }
 
 func (self *RedisStore) Get(key string) (string, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.String(conn.Do("GET", key))
+
+	return redis.String(self.Do("GET", key))
 }
 
 func (self *RedisStore) Lpush(key string, data string) (bool, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Bool(conn.Do("LPUSH", key, data))
+
+	return redis.Bool(self.Do("LPUSH", key, data))
 }
 
 func (self *RedisStore) Rpop(key string) (string, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.String(conn.Do("RPOP", key))
+
+	return redis.String(self.Do("RPOP", key))
 }
 
 func (self *RedisStore) Llen(key string) (uint64, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Uint64(conn.Do("LLEN", key))
+
+	return redis.Uint64(self.Do("LLEN", key))
 }
 
 func (self *RedisStore) Hincrby(key string, field string, number int64) (int64, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Int64(conn.Do("HINCRBY", key, field, number))
+
+	return redis.Int64(self.Do("HINCRBY", key, field, number))
 }
 
 func (self *RedisStore) Sadd(key string, data string) (bool, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Bool(conn.Do("SADD", key, data))
+
+	return redis.Bool(self.Do("SADD", key, data))
 }
 
 func (self *RedisStore) Smembers(key string) (string, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.String(conn.Do("SMEMBERS", key))
+
+	return redis.String(self.Do("SMEMBERS", key))
 }
 
 func (self *RedisStore) Keys(key string) ([]string, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Strings(conn.Do("KEYS", "*id_*"))
+
+	return redis.Strings(self.Do("KEYS", "*id_*"))
 }
 
 //设置哈希字段的字符串值
 func (self *RedisStore) Hset(key string, field string, data string) (int, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Int(conn.Do("HSET", key, field, data))
+
+	return redis.Int(self.Do("HSET", key, field, data))
 }
 
 //为多个哈希字段分别设置它们的值
 func (self *RedisStore) Hmset(args ...interface{}) (string, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.String(conn.Do("HMSET", args))
+
+	return redis.String(self.Do("HMSET", args))
 }
 
 func (self *RedisStore) Hget(key string, field string) (string, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.String(conn.Do("HGET", key, field))
+
+	return redis.String(self.Do("HGET", key, field))
 }
 
 //获取存储在指定键的哈希中的所有字段和值
 func (self *RedisStore) Hgetall(key string) (interface{}, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.StringMap(conn.Do("HGETALL", key))
+
+	return redis.StringMap(self.Do("HGETALL", key))
 }
 
 //获取存储在指定键的哈希中的所有字段和值
 func (self *RedisStore) HgetallInt(key string) (map[string]int, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.IntMap(conn.Do("HGETALL", key))
+
+	return redis.IntMap(self.Do("HGETALL", key))
 }
 
 //设置哈希字段的字符串值
 func (self *RedisStore) Hexists(key string, field string) (int, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Int(conn.Do("HEXISTS", key, field))
+
+	return redis.Int(self.Do("HEXISTS", key, field))
 }
 
 //开启事务
 func (self *RedisStore) Multi() (string, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.String(conn.Do("MULTI"))
+
+	return redis.String(self.Do("MULTI"))
 }
 
 //提交事务
 func (self *RedisStore) Exec() (string, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	a, err := redis.String(conn.Do("EXEC"))
-	log.Print("Exec", a, err)
-	return redis.String(conn.Do("EXEC"))
+	return redis.String(self.Do("EXEC"))
 }
 
 //回滚MULTI之后发出的所有命令
 func (self *RedisStore) Discard() (string, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.String(conn.Do("DISCARD"))
+
+	return redis.String(self.Do("DISCARD"))
 }
 
 func (self *RedisStore) Setnx(key string, data string) (int, error) {
-	conn := self.pool.Get()
-	defer conn.Close()
-	return redis.Int(conn.Do("SETNX", key, data))
+	return redis.Int(self.Do("SETNX", key, data))
 }
 
 func (self *RedisStore) Expire(key string, timeout int) (int, error) {
+	return redis.Int(self.Do("EXPIRE", key, timeout))
+}
+
+func (self *RedisStore) Do(commandName string, args ...interface{}) (reply interface{}, err error) {
 	conn := self.pool.Get()
 	defer conn.Close()
-	return redis.Int(conn.Do("EXPIRE", key, timeout))
+	return conn.Do(commandName, args...)
 }
